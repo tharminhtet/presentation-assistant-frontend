@@ -1,16 +1,18 @@
 "use client";
 
-import { useState, useEffect, useRef, FormEvent } from "react";
+import { useState, useEffect, useRef } from "react";
+import Reveal from "reveal.js";
 
 function App() {
   const deckDivRef = useRef<HTMLDivElement>(null);
   const deckRef = useRef<any | null>(null);
-  const [input, setInput] = useState("");
+  const [isRecording, setIsRecording] = useState(false);
+  const [transcript, setTranscript] = useState("");
+  const wsRef = useRef<WebSocket | null>(null);
 
   useEffect(() => {
     const clientSideInitialization = async () => {
       // Dynamically import Reveal.js and its CSS
-      const Reveal = (await import("reveal.js")).default;
       await import("reveal.js/dist/reveal.css");
       await import("reveal.js/dist/theme/black.css");
 
@@ -22,56 +24,93 @@ function App() {
         });
 
         await deckRef.current.initialize();
-        // Place for event handlers and plugin setups
       }
     };
 
     clientSideInitialization();
+
+    // Set up WebSocket connection
+    wsRef.current = new WebSocket("ws://localhost:8000");
+
+    wsRef.current.onopen = () => {
+      console.log("WebSocket connection established");
+    };
+
+    wsRef.current.onmessage = (event) => {
+      console.log("Received message from server:", event.data);
+      const data = JSON.parse(event.data);
+      if (data.type === "text") {
+        setTranscript(data.content);
+        handleSlideAction(data.content);
+      }
+      // Handle audio responses if needed
+    };
+
+    wsRef.current.onerror = (error) => {
+      console.error("WebSocket error:", error);
+    };
+
+    wsRef.current.onclose = () => {
+      console.log("WebSocket connection closed");
+    };
 
     return () => {
       if (deckRef.current) {
         deckRef.current.destroy();
         deckRef.current = null;
       }
+      if (wsRef.current) {
+        wsRef.current.close();
+      }
     };
   }, []);
 
-  const handleSubmit = async (e: FormEvent) => {
-    e.preventDefault();
-    try {
-      const response = await fetch("http://localhost:8000/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: input }),
-      });
-      const data = await response.json();
-
-      if (data.slide_action) {
-        switch (data.slide_action.action) {
-          case "next":
-            deckRef.current?.next();
-            break;
-          case "previous":
-            deckRef.current?.prev();
-            break;
-          case "jump":
-            // New case to handle going to a specific slide number
-            const slideNumber = parseInt(data.slide_action.page);
-            if (!isNaN(slideNumber) && deckRef.current) {
-              deckRef.current.slide(slideNumber - 1); // Reveal.js uses 0-based index
-            } else {
-              console.error("Invalid slide number:", data.slide_action.page);
-            }
-            break;
-        }
-      }
-
-      // You can display the LLM's response if needed
-      console.log("LLM response:", data.response);
-    } catch (error) {
-      console.error("Error:", error);
+  const handleSlideAction = (content: string) => {
+    if (content.includes("next slide")) {
+      deckRef.current?.next();
+    } else if (content.includes("previous slide")) {
+      deckRef.current?.prev();
+    } else if (content.includes("go to slide")) {
+      const slideNumber = parseInt(content.match(/\d+/)?.[0] || "1");
+      deckRef.current?.slide(slideNumber - 1);
     }
-    setInput("");
+  };
+
+  const toggleRecording = async () => {
+    if (isRecording) {
+      setIsRecording(false);
+      // Stop recording logic
+    } else {
+      setIsRecording(true);
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: true,
+        });
+        const mediaRecorder = new MediaRecorder(stream);
+        mediaRecorder.ondataavailable = (event) => {
+          if (
+            event.data.size > 0 &&
+            wsRef.current?.readyState === WebSocket.OPEN
+          ) {
+            const reader = new FileReader();
+            reader.onload = () => {
+              const base64Audio = reader.result?.toString().split(",")[1];
+              wsRef.current?.send(
+                JSON.stringify({
+                  type: "audio",
+                  audio: base64Audio,
+                })
+              );
+            };
+            reader.readAsDataURL(event.data);
+          }
+        };
+        mediaRecorder.start(250); // Send audio chunks every 250ms
+      } catch (error) {
+        console.error("Error accessing microphone:", error);
+        setIsRecording(false);
+      }
+    }
   };
 
   return (
@@ -84,8 +123,7 @@ function App() {
           <section>Slide 4</section>
         </div>
       </div>
-      <form
-        onSubmit={handleSubmit}
+      <div
         style={{
           position: "absolute",
           bottom: 20,
@@ -96,15 +134,11 @@ function App() {
           borderRadius: "5px",
         }}
       >
-        <input
-          type="text"
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          placeholder="Enter command..."
-          style={{ marginRight: "10px" }}
-        />
-        <button type="submit">Send</button>
-      </form>
+        <button onClick={toggleRecording}>
+          {isRecording ? "Stop Recording" : "Start Recording"}
+        </button>
+        <p>{transcript}</p>
+      </div>
     </div>
   );
 }
